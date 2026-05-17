@@ -12,8 +12,12 @@
                     <div class="text-center mb-5">
                         @if($result === 'Verified News')
                             <span class="badge bg-success fs-4 p-3 rounded-pill shadow-sm">✅ Verified News</span>
+                        @elseif($result === 'Fake News')
+                            <span class="badge bg-danger fs-4 p-3 rounded-pill shadow-sm">🚫 Fake News</span>
+                        @elseif($result === 'Unverified')
+                            <span class="badge bg-warning text-dark fs-4 p-3 rounded-pill shadow-sm">⚠️ Unverified</span>
                         @else
-                            <span class="badge bg-danger fs-4 p-3 rounded-pill shadow-sm">⚠️ Unverified / Fake</span>
+                            <span class="badge bg-warning text-dark fs-4 p-3 rounded-pill shadow-sm">⚠️ Unverified</span>
                         @endif
                     </div>
 

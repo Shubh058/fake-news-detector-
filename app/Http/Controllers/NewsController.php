@@ -25,9 +25,10 @@ class NewsController extends Controller
         $analyses = \App\Models\Analysis::orderBy('created_at', 'desc')->take(20)->get();
         $totalAnalyses = \App\Models\Analysis::count();
         $verifiedCount = \App\Models\Analysis::where('result', 'Verified News')->orWhere('result', 'Trusted Source')->count();
-        $fakeCount = \App\Models\Analysis::where('result', 'Unverified')->orWhere('result', 'Possibly Fake')->count();
+        $unverifiedCount = \App\Models\Analysis::where('result', 'Unverified')->count();
+        $fakeCount = \App\Models\Analysis::where('result', 'Fake News')->orWhere('result', 'Possibly Fake')->count();
 
-        return view('news.create', compact('analyses', 'totalAnalyses', 'verifiedCount', 'fakeCount'));
+        return view('news.create', compact('analyses', 'totalAnalyses', 'verifiedCount', 'unverifiedCount', 'fakeCount'));
     }
 
     /**
@@ -60,14 +61,19 @@ class NewsController extends Controller
             }
         }
 
-        $prompt = "You are a highly intelligent fact-checker. Analyze the following news input.
-If the input is primarily a URL from a well-known, highly trustworthy news media outlet (e.g., Reuters, AP, BBC, NYT, CNN), you should heavily weigh the domain's reputation. If the domain is highly trusted, you may classify it as 'Verified' even if you can't verify the specific article.
-If the input contains text claims, verify those claims against your knowledge base.
+        $prompt = "You are a highly intelligent fact-checker. Analyze the following news input and classify it into exactly one of three categories.
+
+Classification Rules:
+- 'Verified': The claim is confirmed true based on your knowledge base, or the URL is from a well-known highly trustworthy outlet (Reuters, AP, BBC, NYT, CNN, etc.).
+- 'Unverified': The claim cannot be confirmed or denied — it may be recent breaking news outside your knowledge, a local event you have no data on, or simply unsubstantiated.
+- 'Fake': Use this ONLY when the claim is demonstrably false — e.g., it contradicts well-established facts, is scientifically impossible, makes claims that directly oppose widely verified and reported news (e.g., 'The Eiffel Tower is in London', 'Einstein never existed'), or invents events that provably did not happen.
+
 Provide your response strictly as a JSON object with the following keys:
-- 'status': strictly 'Verified', 'Unverified', or 'Possibly Fake'
-- 'explanation': a detailed paragraph explaining your reasoning, the context, and the reputation of the source if it is a URL.
-- 'headlines': an array of strings containing related headlines from trustworthy websites.
-- 'search_query': a highly optimized search query string (3-6 keywords max) to find this exact news event on a search engine, in case you cannot verify it.
+- 'status': strictly one of 'Verified', 'Unverified', or 'Fake'
+- 'explanation': a detailed paragraph explaining your reasoning, citing what contradicts or confirms the claim.
+- 'headlines': an array of strings containing related real headlines from trustworthy websites that support your verdict.
+- 'search_query': a highly optimized search query string (3-6 keywords max) to find this exact news event on a search engine.
+- 'contradicts_verified_news': a boolean true/false — set to true if the submitted claim directly contradicts known verified news or facts.
 
 News Input:
 {$newsText}";
@@ -102,10 +108,11 @@ News Input:
         });
 
         $isVerified = false;
+        $isFake = false;
         $context = null;
         $searchQuery = null;
 
-        $parseResponse = function ($content) use (&$isVerified, &$context, &$searchQuery) {
+        $parseResponse = function ($content) use (&$isVerified, &$isFake, &$context, &$searchQuery) {
             if (!$content) return false;
             
             // Remove markdown code blocks if any
@@ -113,8 +120,13 @@ News Input:
             $json = json_decode($content, true);
 
             if (is_array($json) && isset($json['status'])) {
-                if (stripos($json['status'], 'Verified') !== false && stripos($json['status'], 'Unverified') === false) {
+                $status = strtolower(trim($json['status']));
+                if ($status === 'verified') {
                     $isVerified = true;
+                    $isFake = false;
+                } elseif ($status === 'fake') {
+                    $isFake = true;
+                    $isVerified = false;
                 }
                 $context = $json;
                 $searchQuery = $json['search_query'] ?? null;
@@ -135,8 +147,14 @@ News Input:
             $parseResponse($content);
         }
 
-        // If either one says verified, return 'Verified News', else 'Unverified'.
-        $result = $isVerified ? 'Verified News' : 'Unverified';
+        // Map AI status to final result label
+        if ($isVerified) {
+            $result = 'Verified News';
+        } elseif ($isFake) {
+            $result = 'Fake News';
+        } else {
+            $result = 'Unverified';
+        }
 
         if (!$searchQuery && !$isVerified) {
             // Generate a simple query from the first few words of the input if the AI failed to provide one
@@ -144,9 +162,9 @@ News Input:
             $searchQuery = implode(" ", array_slice($words, 0, 4));
         }
 
-        \Illuminate\Support\Facades\Log::info("AI Parsed: Verified=" . ($isVerified?'yes':'no') . " SearchQuery=" . $searchQuery);
+        \Illuminate\Support\Facades\Log::info("AI Parsed: Verified=" . ($isVerified?'yes':'no') . " Fake=" . ($isFake?'yes':'no') . " SearchQuery=" . $searchQuery);
 
-        // Fallback to NewsAPI if unverified
+        // Fallback to NewsAPI for unverified/fake claims to fetch related headlines
         if (!$isVerified && $searchQuery) {
             try {
                 $newsapiKey = env('NEWSAPI_KEY');
@@ -157,13 +175,27 @@ News Input:
                     \Illuminate\Support\Facades\Log::info("NewsAPI returned totalResults: " . ($all_articles->totalResults ?? 'null'));
 
                     if (isset($all_articles->totalResults) && $all_articles->totalResults > 0) {
-                        $isVerified = true;
-                        $result = 'Verified News';
-                        $context['status'] = 'Verified';
-                        $context['explanation'] = "This breaking news could not be verified by the AI's internal knowledge base, but we successfully found matching articles from global news sources via real-time search.";
-                        $context['headlines'] = [];
+                        $headlines = [];
                         foreach ($all_articles->articles as $article) {
-                            $context['headlines'][] = $article->title . " (" . $article->source->name . ")";
+                            $headlines[] = $article->title . " (" . $article->source->name . ")";
+                        }
+
+                        // If AI already said Fake OR context says it contradicts verified news,
+                        // keep it as Fake News and add real headlines that contradict the claim.
+                        $contradicts = !empty($context['contradicts_verified_news']);
+                        if ($isFake || $contradicts) {
+                            $result = 'Fake News';
+                            $context['status'] = 'Fake';
+                            $context['related_news_found'] = true;
+                            $context['explanation'] = ($context['explanation'] ?? '') . " Real-world news articles on this topic were found that further contradict or disprove the submitted claim.";
+                            $context['headlines'] = $headlines;
+                        } else {
+                            // Could not verify via AI but related articles exist — stay Unverified
+                            $result = 'Unverified';
+                            $context['status'] = 'Unverified';
+                            $context['related_news_found'] = true;
+                            $context['explanation'] = "This news could not be verified by the AI's internal knowledge base, but related articles from global news sources were found via real-time search.";
+                            $context['headlines'] = $headlines;
                         }
                     }
                 } else {

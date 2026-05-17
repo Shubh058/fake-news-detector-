@@ -26,7 +26,7 @@
 
     <!-- Statistics Cards -->
     <div class="row mb-5">
-        <div class="col-md-4 mb-3">
+        <div class="col-md-3 mb-3">
             <div class="card shadow-sm border-0 h-100 text-center py-4" style="background: rgba(255,255,255,0.7); backdrop-filter: blur(10px);">
                 <div class="card-body">
                     <h5 class="text-secondary text-uppercase fw-bold mb-3" style="letter-spacing: 1px;">Total Checks</h5>
@@ -34,7 +34,7 @@
                 </div>
             </div>
         </div>
-        <div class="col-md-4 mb-3">
+        <div class="col-md-3 mb-3">
             <div class="card shadow-sm border-0 h-100 text-center py-4" style="background: rgba(255,255,255,0.7); backdrop-filter: blur(10px);">
                 <div class="card-body">
                     <h5 class="text-secondary text-uppercase fw-bold mb-3" style="letter-spacing: 1px;">Verified News</h5>
@@ -42,10 +42,18 @@
                 </div>
             </div>
         </div>
-        <div class="col-md-4 mb-3">
+        <div class="col-md-3 mb-3">
             <div class="card shadow-sm border-0 h-100 text-center py-4" style="background: rgba(255,255,255,0.7); backdrop-filter: blur(10px);">
                 <div class="card-body">
-                    <h5 class="text-secondary text-uppercase fw-bold mb-3" style="letter-spacing: 1px;">Fake / Unverified</h5>
+                    <h5 class="text-secondary text-uppercase fw-bold mb-3" style="letter-spacing: 1px;">Unverified</h5>
+                    <h1 class="display-3 fw-bold text-warning">{{ $unverifiedCount }}</h1>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card shadow-sm border-0 h-100 text-center py-4" style="background: rgba(255,255,255,0.7); backdrop-filter: blur(10px);">
+                <div class="card-body">
+                    <h5 class="text-secondary text-uppercase fw-bold mb-3" style="letter-spacing: 1px;">Fake News</h5>
                     <h1 class="display-3 fw-bold text-danger">{{ $fakeCount }}</h1>
                 </div>
             </div>
@@ -76,10 +84,12 @@
                                 {{ $analysis->news_text }}
                             </td>
                             <td class="border-light text-center">
-                                @if(str_contains($analysis->result, 'Verified') || str_contains($analysis->result, 'Trusted'))
+                                @if($analysis->result === 'Verified News' || $analysis->result === 'Trusted Source')
                                     <span class="badge bg-success rounded-pill px-3 py-2">✅ {{ $analysis->result }}</span>
+                                @elseif($analysis->result === 'Fake News')
+                                    <span class="badge bg-danger rounded-pill px-3 py-2">🚫 {{ $analysis->result }}</span>
                                 @else
-                                    <span class="badge bg-danger rounded-pill px-3 py-2">⚠️ {{ $analysis->result }}</span>
+                                    <span class="badge bg-warning text-dark rounded-pill px-3 py-2">⚠️ {{ $analysis->result }}</span>
                                 @endif
                             </td>
                             <td class="border-light text-end text-muted">
