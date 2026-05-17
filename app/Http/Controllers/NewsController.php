@@ -25,10 +25,9 @@ class NewsController extends Controller
         $analyses = \App\Models\Analysis::orderBy('created_at', 'desc')->take(20)->get();
         $totalAnalyses = \App\Models\Analysis::count();
         $verifiedCount = \App\Models\Analysis::where('result', 'Verified News')->orWhere('result', 'Trusted Source')->count();
-        $unverifiedCount = \App\Models\Analysis::where('result', 'Unverified')->count();
-        $fakeCount = \App\Models\Analysis::where('result', 'Fake News')->orWhere('result', 'Possibly Fake')->count();
+        $fakeCount = \App\Models\Analysis::where('result', 'Unverified')->orWhere('result', 'Fake News')->orWhere('result', 'Possibly Fake')->count();
 
-        return view('news.create', compact('analyses', 'totalAnalyses', 'verifiedCount', 'unverifiedCount', 'fakeCount'));
+        return view('news.create', compact('analyses', 'totalAnalyses', 'verifiedCount', 'fakeCount'));
     }
 
     /**
@@ -61,19 +60,14 @@ class NewsController extends Controller
             }
         }
 
-        $prompt = "You are a highly intelligent fact-checker. Analyze the following news input and classify it into exactly one of three categories.
-
-Classification Rules:
-- 'Verified': The claim is confirmed true based on your knowledge base, or the URL is from a well-known highly trustworthy outlet (Reuters, AP, BBC, NYT, CNN, etc.).
-- 'Unverified': The claim cannot be confirmed or denied — it may be recent breaking news outside your knowledge, a local event you have no data on, or simply unsubstantiated.
-- 'Fake': Use this ONLY when the claim is demonstrably false — e.g., it contradicts well-established facts, is scientifically impossible, makes claims that directly oppose widely verified and reported news (e.g., 'The Eiffel Tower is in London', 'Einstein never existed'), or invents events that provably did not happen.
-
+        $prompt = "You are a highly intelligent fact-checker. Analyze the following news input.
+If the input is primarily a URL from a well-known, highly trustworthy news media outlet (e.g., Reuters, AP, BBC, NYT, CNN), you should heavily weigh the domain's reputation. If the domain is highly trusted, classify it as 'Verified'.
+If the input contains text claims, verify those claims against your knowledge base.
 Provide your response strictly as a JSON object with the following keys:
-- 'status': strictly one of 'Verified', 'Unverified', or 'Fake'
-- 'explanation': a detailed paragraph explaining your reasoning, citing what contradicts or confirms the claim.
-- 'headlines': an array of strings containing related real headlines from trustworthy websites that support your verdict.
+- 'status': strictly 'Verified' or 'Unverified'
+- 'explanation': a detailed paragraph explaining your reasoning and context.
+- 'headlines': an array of strings containing related headlines from trustworthy websites.
 - 'search_query': a highly optimized search query string (3-6 keywords max) to find this exact news event on a search engine.
-- 'contradicts_verified_news': a boolean true/false — set to true if the submitted claim directly contradicts known verified news or facts.
 
 News Input:
 {$newsText}";
@@ -108,13 +102,12 @@ News Input:
         });
 
         $isVerified = false;
-        $isFake = false;
         $context = null;
         $searchQuery = null;
 
-        $parseResponse = function ($content) use (&$isVerified, &$isFake, &$context, &$searchQuery) {
+        $parseResponse = function ($content) use (&$isVerified, &$context, &$searchQuery) {
             if (!$content) return false;
-            
+
             // Remove markdown code blocks if any
             $content = preg_replace('/```(?:json)?\s*(.*?)\s*```/s', '$1', $content);
             $json = json_decode($content, true);
@@ -123,10 +116,6 @@ News Input:
                 $status = strtolower(trim($json['status']));
                 if ($status === 'verified') {
                     $isVerified = true;
-                    $isFake = false;
-                } elseif ($status === 'fake') {
-                    $isFake = true;
-                    $isVerified = false;
                 }
                 $context = $json;
                 $searchQuery = $json['search_query'] ?? null;
@@ -147,57 +136,37 @@ News Input:
             $parseResponse($content);
         }
 
-        // Map AI status to final result label
-        if ($isVerified) {
-            $result = 'Verified News';
-        } elseif ($isFake) {
-            $result = 'Fake News';
-        } else {
-            $result = 'Unverified';
-        }
+        // Map AI result to label — only two values: Verified News or Unverified
+        $result = $isVerified ? 'Verified News' : 'Unverified';
 
         if (!$searchQuery && !$isVerified) {
-            // Generate a simple query from the first few words of the input if the AI failed to provide one
             $words = str_word_count(strip_tags($originalInput), 1);
             $searchQuery = implode(" ", array_slice($words, 0, 4));
         }
 
-        \Illuminate\Support\Facades\Log::info("AI Parsed: Verified=" . ($isVerified?'yes':'no') . " Fake=" . ($isFake?'yes':'no') . " SearchQuery=" . $searchQuery);
+        \Illuminate\Support\Facades\Log::info("AI Parsed: Verified=" . ($isVerified ? 'yes' : 'no') . " SearchQuery=" . $searchQuery);
 
-        // Fallback to NewsAPI for unverified/fake claims to fetch related headlines
+        // Fallback to NewsAPI for unverified — if related articles found, mark related_news_found=true (yellow)
+        // If nothing found, related_news_found stays false/absent (red in view)
         if (!$isVerified && $searchQuery) {
             try {
                 $newsapiKey = env('NEWSAPI_KEY');
                 if ($newsapiKey) {
                     $newsapi = new \jcobhams\NewsApi\NewsApi($newsapiKey);
                     $all_articles = $newsapi->getEverything($searchQuery, null, null, null, null, null, 'en', 'relevancy', 5, 1);
-                    
+
                     \Illuminate\Support\Facades\Log::info("NewsAPI returned totalResults: " . ($all_articles->totalResults ?? 'null'));
 
                     if (isset($all_articles->totalResults) && $all_articles->totalResults > 0) {
-                        $headlines = [];
+                        // Related news exists — keep Unverified but flag it (yellow in view)
+                        $context['related_news_found'] = true;
+                        $context['explanation'] = "This news could not be verified by the AI's internal knowledge base, but related articles from global news sources were found via real-time search.";
+                        $context['headlines'] = [];
                         foreach ($all_articles->articles as $article) {
-                            $headlines[] = $article->title . " (" . $article->source->name . ")";
-                        }
-
-                        // If AI already said Fake OR context says it contradicts verified news,
-                        // keep it as Fake News and add real headlines that contradict the claim.
-                        $contradicts = !empty($context['contradicts_verified_news']);
-                        if ($isFake || $contradicts) {
-                            $result = 'Fake News';
-                            $context['status'] = 'Fake';
-                            $context['related_news_found'] = true;
-                            $context['explanation'] = ($context['explanation'] ?? '') . " Real-world news articles on this topic were found that further contradict or disprove the submitted claim.";
-                            $context['headlines'] = $headlines;
-                        } else {
-                            // Could not verify via AI but related articles exist — stay Unverified
-                            $result = 'Unverified';
-                            $context['status'] = 'Unverified';
-                            $context['related_news_found'] = true;
-                            $context['explanation'] = "This news could not be verified by the AI's internal knowledge base, but related articles from global news sources were found via real-time search.";
-                            $context['headlines'] = $headlines;
+                            $context['headlines'][] = $article->title . " (" . $article->source->name . ")";
                         }
                     }
+                    // If totalResults == 0, related_news_found is not set → red in view
                 } else {
                     \Illuminate\Support\Facades\Log::info("NewsAPI Key is missing.");
                 }
